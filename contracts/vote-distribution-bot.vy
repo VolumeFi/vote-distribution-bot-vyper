@@ -1,53 +1,69 @@
 # @version 0.3.7
 
-struct Deposit:
-    path: DynArray[address, MAX_SIZE]
-    amount1: uint256
-    depositor: address
-    deposit_time: uint256
-    duration: uint256
-
 interface WrappedEth:
     def deposit(): payable
 
 interface ERC20:
     def balanceOf(_owner: address) -> uint256: view
+    def approve(spender: address, amount: uint256) -> bool: nonpayable
 
 interface VeSDT:
     def create_lock(_value: uint256, _unlock_time: uint256): nonpayable
+    def increase_amount(_value: uint256): nonpayable
+    def increase_unlock_time(_unlock_time: uint256): nonpayable
+    def withdraw(): nonpayable
+
+interface GaugeController:
+    def vote_for_gauge_weights(_gauge_addr: address, _user_weight: uint256): nonpayable
+
+interface FeeDistributor:
+    def claim() -> uint256: nonpayable
+
+interface RewardVault:
+    def withdrawAll(): nonpayable
+
+interface ZapDepositor:
+    def remove_liquidity_one_coin(_pool: address, _burn_amount: uint256, i: int128, _min_amount: uint256, _receiver: address) -> uint256: nonpayable
 
 interface UniswapV2Router:
     def WETH() -> address: pure
     def swapExactTokensForTokens(amountIn: uint256, amountOutMin: uint256, path: DynArray[address, MAX_SIZE], to: address, deadline: uint256) -> DynArray[uint256, MAX_SIZE]: nonpayable
 
 event Deposited:
-    deposit_id: uint256
     token0: address
     amount0: uint256
     amount1: uint256
-    depositor: address
     unlock_time: uint256
 
 SDT: constant(address) = 0x73968b9a57c6E53d41345FD57a6E6ae27d6CDB2F
 veSDT: constant(address) = 0x0C30476f66034E11782938DF8e4384970B6c9e8a
+GAUGECONTROLLER: constant(address) = 0x75f8f7fa4b6DA6De9F4fE972c811b778cefce882
+FEE_DISTRIBUTOR: constant(address) = 0x29f3dd38dB24d3935CF1bf841e6b2B461A3E5D92
+REWARD_VAULT: constant(address) = 0x5af15DA84A4a6EDf2d9FA6720De921E1026E37b7
+REWARD_LP_TOKEN: constant(address) = 0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B
+CURVE_ZAP_DEPOSITOR: constant(address) = 0xA79828DF1850E8a3A3064576f380D90aECDD3359
+CURVE_FRAX_POOL: constant(address) = 0xd632f22692FaC7611d2AA1C0D552930D43CAEd3B
+USDC: constant(address) = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 MAX_SIZE: constant(uint256) = 8
 VETH: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE # Virtual ETH
 WETH: immutable(address)
 ROUTER: immutable(address)
-deposit_size: public(uint256)
-deposits: public(HashMap[uint256, Deposit])
-deposits_user: public(HashMap[address, uint256])
+OWNER: immutable(address)
 compass: public(address)
+locked_amount: public(uint256)
+deposit_time: public(uint256)
+unlock_time: public(uint256)
 
 event UpdateCompass:
     old_compass: address
     new_compass: address
 
 @external
-def __init__(_compass: address, router: address):
+def __init__(_compass: address, router: address, owner: address):
     self.compass = _compass
     ROUTER = router
     WETH = UniswapV2Router(ROUTER).WETH()
+    OWNER = owner
     log UpdateCompass(empty(address), _compass)
 
 @internal
@@ -72,12 +88,12 @@ def _safe_transfer_from(_token: address, _from: address, _to: address, _value: u
 
 @external
 @payable
-def deposit(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: uint256, duration: uint256):
-    assert len(path) > 2, "Wrong path"
+def swap_lock(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: uint256, unlock_time: uint256):
+    assert msg.sender == OWNER
     _path: DynArray[address, MAX_SIZE] = path
     token0: address = path[0]
     last_index: uint256 = unsafe_sub(len(path), 1)
-    assert path[last_index] == SDT, "Wrong path"
+    assert len(path) >= 2 and path[last_index] == SDT, "Wrong path"
     if token0 == VETH:
         assert msg.value == amount0
         if msg.value > amount0:
@@ -88,39 +104,45 @@ def deposit(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: ui
         orig_balance: uint256 = ERC20(token0).balanceOf(self)
         self._safe_transfer_from(token0, msg.sender, self, amount0)
         assert ERC20(token0).balanceOf(self) == orig_balance + amount0
+    self._safe_approve(_path[0], ROUTER, amount0)
     amounts: DynArray[uint256, MAX_SIZE] = UniswapV2Router(ROUTER).swapExactTokensForTokens(amount0, min_amount1, _path, self, block.timestamp)
     amount1: uint256 = amounts[last_index]
     assert amount1 > 0
-    deposit_id: uint256 = self.deposits_user[msg.sender]
-    if deposit_id == 0:
-        deposit_id = self.deposit_size + 1
-        self.deposits[deposit_id] = Deposit({
-            path: path,
-            amount1: amount1,
-            depositor: msg.sender,
-            deposit_time: block.timestamp,
-            duration: duration
-        })
-        unlock_time: uint256 = block.timestamp + duration
+    ERC20(SDT).approve(veSDT, amount1)
+    _locked_amount: uint256 = self.locked_amount
+    if _locked_amount == 0:
+        self.locked_amount = amount1
+        self.deposit_time = block.timestamp
+        self.unlock_time = unlock_time
         VeSDT(veSDT).create_lock(amount1, unlock_time)
     else:
-        if duration == 0:
-            
-        deposit: Deposit = self.deposits[deposit_id]
-        deposit.amount1 += amount1
-        self.deposits[deposit_id] = Deposit({
-            path: path,
-            amount1: amount1,
-            depositor: msg.sender,
-            deposit_time: block.timestamp,
-            duration: duration
-        })
-        VeSDT(veSDT).create_lock(amount1, unlock_time)
-    self.deposit_size = deposit_id
-    self._safe_approve(SDT, veSDT, amount1)
-    
-    
-    log Deposited(deposit_id, token0, amount0, amount1, msg.sender, unlock_time)
+        VeSDT(veSDT).increase_amount(amount1)
+        if unlock_time != 0:
+            VeSDT(veSDT).increase_unlock_time(unlock_time)
+        self.locked_amount = _locked_amount + amount1
+    log Deposited(token0, amount0, amount1, unlock_time)
+
+@external
+def vote(_gauge_addr: address, _user_weight: uint256):
+    assert msg.sender == self.compass
+    GaugeController(GAUGECONTROLLER).vote_for_gauge_weights(_gauge_addr, _user_weight)
+
+@external
+def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256):
+    assert msg.sender == self.compass
+    FeeDistributor(FEE_DISTRIBUTOR).claim()
+    RewardVault(REWARD_VAULT).withdrawAll()
+    _amount: uint256 = ERC20(REWARD_LP_TOKEN).balanceOf(self)
+    self._safe_approve(REWARD_LP_TOKEN, CURVE_ZAP_DEPOSITOR, _amount)
+    ZapDepositor(CURVE_ZAP_DEPOSITOR).remove_liquidity_one_coin(CURVE_FRAX_POOL, _amount, 2, 1, OWNER)
+    _amount = ERC20(USDC).balanceOf(self)
+    self._safe_approve(USDC, ROUTER, _amount)
+    UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, path, OWNER, block.timestamp)
+
+@external
+def withdraw():
+    assert msg.sender == OWNER
+    VeSDT(veSDT).withdraw()
 
 @external
 def update_compass(new_compass: address):
