@@ -30,6 +30,12 @@ event Claimed:
     out_token: address
     out_amount: uint256
 
+event Withdrawn:
+    owner: address
+    sdt_amount: uint256
+    out_token: address
+    out_amount: uint256
+
 @external
 def __init__(_blueprint: address, _compass: address):
     self.blueprint = _blueprint
@@ -56,6 +62,12 @@ def claimed(out_token: address, amount0: uint256):
     owner: address = self.bot_to_owner[msg.sender]
     assert owner != empty(address)
     log Claimed(owner, out_token, amount0)
+
+@external
+def withdrawn(sdt_amount: uint256, out_token: address, amount0: uint256):
+    owner: address = self.bot_to_owner[msg.sender]
+    assert owner != empty(address)
+    log Withdrawn(owner, sdt_amount, out_token, amount0)
 
 @external
 def update_compass(new_compass: address):

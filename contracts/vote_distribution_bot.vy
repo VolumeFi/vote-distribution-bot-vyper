@@ -16,6 +16,7 @@ interface VeSDT:
 interface Factory:
     def deposited(token0: address, amount0: uint256, amount1: uint256, unlock_time: uint256): nonpayable
     def claimed(out_token: address, amount0: uint256): nonpayable
+    def withdrawn(sdt_amount: uint256, out_token: address, amount0: uint256): nonpayable
 
 interface GaugeController:
     def vote_for_gauge_weights(_gauge_addr: address, _user_weight: uint256): nonpayable
@@ -51,7 +52,6 @@ OWNER: immutable(address)
 FACTORY: public(immutable(address))
 compass: public(address)
 locked_amount: public(uint256)
-deposit_time: public(uint256)
 unlock_time: public(uint256)
 
 event Deposited:
@@ -63,6 +63,12 @@ event Deposited:
 
 event Claimed:
     owner: address
+    out_token: address
+    out_amount: uint256
+
+event Withdrawn:
+    owner: address
+    sdt_amount: uint256
     out_token: address
     out_amount: uint256
 
@@ -125,7 +131,6 @@ def swap_lock(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: 
     _locked_amount: uint256 = self.locked_amount
     if _locked_amount == 0:
         self.locked_amount = amount1
-        self.deposit_time = block.timestamp
         self.unlock_time = unlock_time
         VeSDT(veSDT).create_lock(amount1, unlock_time)
     else:
@@ -154,6 +159,7 @@ def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
     self._safe_approve(USDC, ROUTER, _amount)
     token0: address = path[0]
     last_index: uint256 = unsafe_sub(len(path), 1)
+    assert len(path) >= 2, "Wrong path"
     _path: DynArray[address, MAX_SIZE] = path
     amount0: uint256 = 0
     if path[last_index] == VETH:
@@ -170,9 +176,31 @@ def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
     return amount0
 
 @external
-def withdraw():
+@nonreentrant("lock")
+def withdraw(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
     assert msg.sender == OWNER
+    _amount: uint256 = ERC20(SDT).balanceOf(self)
     VeSDT(veSDT).withdraw()
+    _amount = ERC20(SDT).balanceOf(self) - _amount
+    assert _amount > 0, "Insufficient withdraw amount"
+    self.locked_amount -= _amount
+    self._safe_approve(SDT, ROUTER, _amount)
+    last_index: uint256 = unsafe_sub(len(path), 1)
+    assert len(path) >= 2, "Wrong path"
+    _path: DynArray[address, MAX_SIZE] = path
+    amount0: uint256 = 0
+    if path[last_index] == VETH:
+        _path[last_index] = WETH
+        amount0 = OWNER.balance
+        UniswapV2Router(ROUTER).swapExactTokensForETH(_amount, _min_amount, _path, OWNER, block.timestamp)
+        amount0 = OWNER.balance - amount0
+    else:
+        amount0 = ERC20(path[last_index]).balanceOf(OWNER)
+        UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, _path, OWNER, block.timestamp)
+        amount0 = ERC20(path[last_index]).balanceOf(OWNER) - amount0
+    log Withdrawn(OWNER, _amount, path[last_index], amount0)
+    Factory(FACTORY).withdrawn(_amount, path[last_index], amount0)
+    return amount0
 
 @external
 def update_compass(new_compass: address):
