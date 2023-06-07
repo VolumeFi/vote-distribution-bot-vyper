@@ -1,5 +1,5 @@
 from brownie import accounts, factory
-from eth_abi import encode_abi
+
 
 def main():
     acct = accounts.load("deployer_account")
