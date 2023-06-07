@@ -13,6 +13,10 @@ interface VeSDT:
     def increase_unlock_time(_unlock_time: uint256): nonpayable
     def withdraw(): nonpayable
 
+interface Factory:
+    def deposited(token0: address, amount0: uint256, amount1: uint256, unlock_time: uint256): nonpayable
+    def claimed(out_token: address, amount0: uint256): nonpayable
+
 interface GaugeController:
     def vote_for_gauge_weights(_gauge_addr: address, _user_weight: uint256): nonpayable
 
@@ -28,12 +32,7 @@ interface ZapDepositor:
 interface UniswapV2Router:
     def WETH() -> address: pure
     def swapExactTokensForTokens(amountIn: uint256, amountOutMin: uint256, path: DynArray[address, MAX_SIZE], to: address, deadline: uint256) -> DynArray[uint256, MAX_SIZE]: nonpayable
-
-event Deposited:
-    token0: address
-    amount0: uint256
-    amount1: uint256
-    unlock_time: uint256
+    def swapExactTokensForETH(amountIn: uint256, amountOutMin: uint256, path: DynArray[address, MAX_SIZE], to: address, deadline: uint256) -> DynArray[uint256, MAX_SIZE]: nonpayable
 
 SDT: constant(address) = 0x73968b9a57c6E53d41345FD57a6E6ae27d6CDB2F
 veSDT: constant(address) = 0x0C30476f66034E11782938DF8e4384970B6c9e8a
@@ -49,10 +48,23 @@ VETH: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE # Virtual E
 WETH: immutable(address)
 ROUTER: immutable(address)
 OWNER: immutable(address)
+FACTORY: public(immutable(address))
 compass: public(address)
 locked_amount: public(uint256)
 deposit_time: public(uint256)
 unlock_time: public(uint256)
+
+event Deposited:
+    owner: address
+    token0: address
+    amount0: uint256
+    amount1: uint256
+    unlock_time: uint256
+
+event Claimed:
+    owner: address
+    out_token: address
+    out_amount: uint256
 
 event UpdateCompass:
     old_compass: address
@@ -64,6 +76,7 @@ def __init__(_compass: address, router: address, owner: address):
     ROUTER = router
     WETH = UniswapV2Router(ROUTER).WETH()
     OWNER = owner
+    FACTORY = msg.sender
     log UpdateCompass(empty(address), _compass)
 
 @internal
@@ -120,7 +133,8 @@ def swap_lock(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: 
         if unlock_time != 0:
             VeSDT(veSDT).increase_unlock_time(unlock_time)
         self.locked_amount = _locked_amount + amount1
-    log Deposited(token0, amount0, amount1, unlock_time)
+    log Deposited(msg.sender, token0, amount0, amount1, unlock_time)
+    Factory(FACTORY).deposited(token0, amount0, amount1, unlock_time)
 
 @external
 def vote(_gauge_addr: address, _user_weight: uint256):
@@ -128,7 +142,8 @@ def vote(_gauge_addr: address, _user_weight: uint256):
     GaugeController(GAUGECONTROLLER).vote_for_gauge_weights(_gauge_addr, _user_weight)
 
 @external
-def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256):
+@nonreentrant("lock")
+def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
     assert msg.sender == self.compass
     FeeDistributor(FEE_DISTRIBUTOR).claim()
     RewardVault(REWARD_VAULT).withdrawAll()
@@ -137,7 +152,22 @@ def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256):
     ZapDepositor(CURVE_ZAP_DEPOSITOR).remove_liquidity_one_coin(CURVE_FRAX_POOL, _amount, 2, 1, OWNER)
     _amount = ERC20(USDC).balanceOf(self)
     self._safe_approve(USDC, ROUTER, _amount)
-    UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, path, OWNER, block.timestamp)
+    token0: address = path[0]
+    last_index: uint256 = unsafe_sub(len(path), 1)
+    _path: DynArray[address, MAX_SIZE] = path
+    amount0: uint256 = 0
+    if path[last_index] == VETH:
+        _path[last_index] = WETH
+        amount0 = OWNER.balance
+        UniswapV2Router(ROUTER).swapExactTokensForETH(_amount, _min_amount, _path, OWNER, block.timestamp)
+        amount0 = OWNER.balance - amount0
+    else:
+        amount0 = ERC20(path[last_index]).balanceOf(OWNER)
+        UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, _path, OWNER, block.timestamp)
+        amount0 = ERC20(path[last_index]).balanceOf(OWNER) - amount0
+    log Claimed(OWNER, path[last_index], amount0)
+    Factory(FACTORY).claimed(path[last_index], amount0)
+    return amount0
 
 @external
 def withdraw():
