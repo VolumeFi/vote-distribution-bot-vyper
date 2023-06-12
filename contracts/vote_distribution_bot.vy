@@ -142,9 +142,13 @@ def swap_lock(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: 
     Factory(FACTORY).deposited(token0, amount0, amount1, unlock_time)
 
 @external
-def vote(_gauge_addr: address, _user_weight: uint256):
+def vote(_gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint256, MAX_SIZE]):
     assert msg.sender == self.compass
-    GaugeController(GAUGECONTROLLER).vote_for_gauge_weights(_gauge_addr, _user_weight)
+    assert len(_gauge_addr) == len(_user_weight), "Wrong array length"
+    for i in range(MAX_SIZE):
+        if i == len(_gauge_addr):
+            break
+        GaugeController(GAUGECONTROLLER).vote_for_gauge_weights(_gauge_addr[i], _user_weight[i])
 
 @external
 @nonreentrant("lock")
