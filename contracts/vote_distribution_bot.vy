@@ -96,6 +96,16 @@ def _safe_approve(_token: address, _to: address, _value: uint256):
         assert convert(_response, bool) # dev: failed approve
 
 @internal
+def _safe_transfer(_token: address, _to: address, _value: uint256):
+    _response: Bytes[32] = raw_call(
+        _token,
+        _abi_encode(_to, _value, method_id=method_id("transfer(address,uint256)")),
+        max_outsize=32
+    )  # dev: failed approve
+    if len(_response) > 0:
+        assert convert(_response, bool) # dev: failed approve
+
+@internal
 def _safe_transfer_from(_token: address, _from: address, _to: address, _value: uint256):
     _response: Bytes[32] = raw_call(
         _token,
@@ -109,24 +119,29 @@ def _safe_transfer_from(_token: address, _from: address, _to: address, _value: u
 @payable
 def swap_lock(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: uint256, unlock_time: uint256):
     assert msg.sender == OWNER
-    _path: DynArray[address, MAX_SIZE] = path
-    token0: address = path[0]
-    last_index: uint256 = unsafe_sub(len(path), 1)
-    assert len(path) >= 2 and path[last_index] == SDT, "Wrong path"
-    if token0 == VETH:
-        assert msg.value == amount0
-        if msg.value > amount0:
-            send(msg.sender, msg.value - amount0)
-        WrappedEth(WETH).deposit(value=amount0)
-        _path[0] = WETH
+    amount1: uint256 = amount0
+    token0: address = empty(address)
+    if len(path) == 0:
+        self._safe_transfer_from(SDT, msg.sender, self, amount0)
     else:
-        orig_balance: uint256 = ERC20(token0).balanceOf(self)
-        self._safe_transfer_from(token0, msg.sender, self, amount0)
-        assert ERC20(token0).balanceOf(self) == orig_balance + amount0
-    self._safe_approve(_path[0], ROUTER, amount0)
-    amounts: DynArray[uint256, MAX_SIZE] = UniswapV2Router(ROUTER).swapExactTokensForTokens(amount0, min_amount1, _path, self, block.timestamp)
-    amount1: uint256 = amounts[last_index]
-    assert amount1 > 0
+        _path: DynArray[address, MAX_SIZE] = path
+        token0 = path[0]
+        last_index: uint256 = unsafe_sub(len(path), 1)
+        assert len(path) >= 2 and path[last_index] == SDT, "Wrong path"
+        if token0 == VETH:
+            assert msg.value == amount0
+            if msg.value > amount0:
+                send(msg.sender, msg.value - amount0)
+            WrappedEth(WETH).deposit(value=amount0)
+            _path[0] = WETH
+        else:
+            orig_balance: uint256 = ERC20(token0).balanceOf(self)
+            self._safe_transfer_from(token0, msg.sender, self, amount0)
+            assert ERC20(token0).balanceOf(self) == orig_balance + amount0
+        self._safe_approve(_path[0], ROUTER, amount0)
+        amounts: DynArray[uint256, MAX_SIZE] = UniswapV2Router(ROUTER).swapExactTokensForTokens(amount0, min_amount1, _path, self, block.timestamp)
+        amount1 = amounts[last_index]
+        assert amount1 > 0
     ERC20(SDT).approve(veSDT, amount1)
     _locked_amount: uint256 = self.locked_amount
     if _locked_amount == 0:
@@ -153,31 +168,36 @@ def vote(_gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint25
 @external
 @nonreentrant("lock")
 def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
-    assert msg.sender == self.compass
+    assert msg.sender == OWNER
     FeeDistributor(FEE_DISTRIBUTOR).claim()
     RewardVault(REWARD_VAULT).withdrawAll()
     _amount: uint256 = ERC20(REWARD_LP_TOKEN).balanceOf(self)
     self._safe_approve(REWARD_LP_TOKEN, CURVE_ZAP_DEPOSITOR, _amount)
     ZapDepositor(CURVE_ZAP_DEPOSITOR).remove_liquidity_one_coin(CURVE_FRAX_POOL, _amount, 2, 1, OWNER)
     _amount = ERC20(USDC).balanceOf(self)
+    assert _amount > 0, "Nothing to claim"
     self._safe_approve(USDC, ROUTER, _amount)
-    token0: address = path[0]
-    last_index: uint256 = unsafe_sub(len(path), 1)
-    assert len(path) >= 2, "Wrong path"
-    _path: DynArray[address, MAX_SIZE] = path
-    amount0: uint256 = 0
-    if path[last_index] == VETH:
-        _path[last_index] = WETH
-        amount0 = OWNER.balance
-        UniswapV2Router(ROUTER).swapExactTokensForETH(_amount, _min_amount, _path, OWNER, block.timestamp)
-        amount0 = OWNER.balance - amount0
+    assert path[0] == USDC, "Wrong path"
+    if len(path) >= 2:
+        assert len(path) >= 2, "Wrong path"
+        last_index: uint256 = unsafe_sub(len(path), 1)
+        _path: DynArray[address, MAX_SIZE] = path
+        amount0: uint256 = 0
+        if path[last_index] == VETH:
+            _path[last_index] = WETH
+            amount0 = OWNER.balance
+            UniswapV2Router(ROUTER).swapExactTokensForETH(_amount, _min_amount, _path, OWNER, block.timestamp)
+            amount0 = OWNER.balance - amount0
+        else:
+            amount0 = ERC20(path[last_index]).balanceOf(OWNER)
+            UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, _path, OWNER, block.timestamp)
+            amount0 = ERC20(path[last_index]).balanceOf(OWNER) - amount0
+        log Claimed(OWNER, path[last_index], amount0)
+        Factory(FACTORY).claimed(path[last_index], amount0)
+        return amount0
     else:
-        amount0 = ERC20(path[last_index]).balanceOf(OWNER)
-        UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, _path, OWNER, block.timestamp)
-        amount0 = ERC20(path[last_index]).balanceOf(OWNER) - amount0
-    log Claimed(OWNER, path[last_index], amount0)
-    Factory(FACTORY).claimed(path[last_index], amount0)
-    return amount0
+        self._safe_transfer(USDC, OWNER, _amount)
+        return _amount
 
 @external
 @nonreentrant("lock")
