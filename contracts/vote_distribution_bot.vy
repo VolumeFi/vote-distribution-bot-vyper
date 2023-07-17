@@ -50,40 +50,17 @@ WETH: immutable(address)
 ROUTER: immutable(address)
 OWNER: immutable(address)
 FACTORY: public(immutable(address))
-compass: public(address)
 locked_amount: public(uint256)
 unlock_time: public(uint256)
-
-event Deposited:
-    owner: address
-    token0: address
-    amount0: uint256
-    amount1: uint256
-    unlock_time: uint256
-
-event Claimed:
-    owner: address
-    out_token: address
-    out_amount: uint256
-
-event Withdrawn:
-    owner: address
-    sdt_amount: uint256
-    out_token: address
-    out_amount: uint256
-
-event UpdateCompass:
-    old_compass: address
-    new_compass: address
+gauge_addr: public(DynArray[address, MAX_SIZE])
+user_weight: public(DynArray[uint256, MAX_SIZE])
 
 @external
-def __init__(_compass: address, router: address, owner: address):
-    self.compass = _compass
+def __init__(router: address, owner: address):
     ROUTER = router
     WETH = UniswapV2Router(ROUTER).WETH()
     OWNER = owner
     FACTORY = msg.sender
-    log UpdateCompass(empty(address), _compass)
 
 @internal
 def _safe_approve(_token: address, _to: address, _value: uint256):
@@ -153,17 +130,33 @@ def swap_lock(path: DynArray[address, MAX_SIZE], amount0: uint256, min_amount1: 
         if unlock_time != 0:
             VeSDT(veSDT).increase_unlock_time(unlock_time)
         self.locked_amount = _locked_amount + amount1
-    log Deposited(msg.sender, token0, amount0, amount1, unlock_time)
     Factory(FACTORY).deposited(token0, amount0, amount1, unlock_time)
 
 @external
 def vote(_gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint256, MAX_SIZE]):
-    assert msg.sender == self.compass
+    assert msg.sender == FACTORY
     assert len(_gauge_addr) == len(_user_weight), "Wrong array length"
+    old_gauge_addr: DynArray[address, MAX_SIZE] = self.gauge_addr
+    old_user_weight: DynArray[uint256, MAX_SIZE] = self.user_weight
+    is_different: bool = False
+    if len(old_gauge_addr) == len(_gauge_addr):
+        for i in range(MAX_SIZE):
+            if i == len(old_gauge_addr):
+                break
+            if old_gauge_addr[i] != _gauge_addr[i] or old_user_weight[i] != _user_weight[i]:
+                is_different = True
+                break
+        assert is_different, "Duplicated vote"
+    for i in range(MAX_SIZE):
+        if i == len(old_gauge_addr):
+            break
+        GaugeController(GAUGECONTROLLER).vote_for_gauge_weights(old_gauge_addr[i], 0)
     for i in range(MAX_SIZE):
         if i == len(_gauge_addr):
             break
         GaugeController(GAUGECONTROLLER).vote_for_gauge_weights(_gauge_addr[i], _user_weight[i])
+    self.gauge_addr = _gauge_addr
+    self.user_weight = _user_weight
 
 @external
 @nonreentrant("lock")
@@ -176,10 +169,10 @@ def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
     ZapDepositor(CURVE_ZAP_DEPOSITOR).remove_liquidity_one_coin(CURVE_FRAX_POOL, _amount, 2, 1, OWNER)
     _amount = ERC20(USDC).balanceOf(self)
     assert _amount > 0, "Nothing to claim"
-    self._safe_approve(USDC, ROUTER, _amount)
     assert path[0] == USDC, "Wrong path"
     if len(path) >= 2:
         assert len(path) >= 2, "Wrong path"
+        self._safe_approve(USDC, ROUTER, _amount)
         last_index: uint256 = unsafe_sub(len(path), 1)
         _path: DynArray[address, MAX_SIZE] = path
         amount0: uint256 = 0
@@ -192,7 +185,6 @@ def claim(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256:
             amount0 = ERC20(path[last_index]).balanceOf(OWNER)
             UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, _path, OWNER, block.timestamp)
             amount0 = ERC20(path[last_index]).balanceOf(OWNER) - amount0
-        log Claimed(OWNER, path[last_index], amount0)
         Factory(FACTORY).claimed(path[last_index], amount0)
         return amount0
     else:
@@ -222,12 +214,5 @@ def withdraw(path: DynArray[address, MAX_SIZE], _min_amount: uint256) -> uint256
         amount0 = ERC20(path[last_index]).balanceOf(OWNER)
         UniswapV2Router(ROUTER).swapExactTokensForTokens(_amount, _min_amount, _path, OWNER, block.timestamp)
         amount0 = ERC20(path[last_index]).balanceOf(OWNER) - amount0
-    log Withdrawn(OWNER, _amount, path[last_index], amount0)
     Factory(FACTORY).withdrawn(_amount, path[last_index], amount0)
     return amount0
-
-@external
-def update_compass(new_compass: address):
-    assert msg.sender == self.compass
-    self.compass = new_compass
-    log UpdateCompass(msg.sender, new_compass)

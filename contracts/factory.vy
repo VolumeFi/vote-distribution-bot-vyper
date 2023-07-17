@@ -25,27 +25,29 @@ event DeployVoteDistributionBot:
     owner: address
 
 event Deposited:
-    owner: address
+    bot: address
     token0: address
     amount0: uint256
     amount1: uint256
     unlock_time: uint256
 
 event Claimed:
-    owner: address
+    bot: address
     out_token: address
     out_amount: uint256
+    time_stamp: uint256
 
 event Withdrawn:
-    owner: address
+    bot: address
     sdt_amount: uint256
     out_token: address
     out_amount: uint256
 
 event Voted:
-    owner: address
+    bot: address
     gauge_addr: DynArray[address, MAX_SIZE]
     user_weight: DynArray[uint256, MAX_SIZE]
+    time_stamp: uint256
 
 event SetPaloma:
     paloma: bytes32
@@ -60,7 +62,7 @@ def __init__(_blueprint: address, _compass: address):
 @external
 def deploy_vote_distribution_bot(router: address):
     assert self.owner_to_bot[msg.sender] == empty(address), "Already user has bot"
-    bot: address = create_from_blueprint(self.blueprint, self.compass, router, msg.sender, code_offset=3)
+    bot: address = create_from_blueprint(self.blueprint, router, msg.sender, code_offset=3)
     self.bot_to_owner[bot] = msg.sender
     self.owner_to_bot[msg.sender] = bot
     log DeployVoteDistributionBot(bot, router, msg.sender)
@@ -77,25 +79,22 @@ def vote(bots: DynArray[address, MAX_SIZE], _gauge_addr: DynArray[address, MAX_S
         if i >= len(bots):
             break
         Bot(bots[i]).vote(_gauge_addr, _user_weight)
-        log Voted(self.bot_to_owner[bots[i]], _gauge_addr, _user_weight)
+        log Voted(bots[i], _gauge_addr, _user_weight, block.timestamp)
 
 @external
 def deposited(token0: address, amount0: uint256, amount1: uint256, unlock_time: uint256):
-    owner: address = self.bot_to_owner[msg.sender]
-    assert owner != empty(address)
-    log Deposited(owner, token0, amount0, amount1, unlock_time)
+    assert self.bot_to_owner[msg.sender] != empty(address)
+    log Deposited(msg.sender, token0, amount0, amount1, unlock_time)
 
 @external
 def claimed(out_token: address, amount0: uint256):
-    owner: address = self.bot_to_owner[msg.sender]
-    assert owner != empty(address)
-    log Claimed(owner, out_token, amount0)
+    assert self.bot_to_owner[msg.sender] != empty(address)
+    log Claimed(msg.sender, out_token, amount0, block.timestamp)
 
 @external
 def withdrawn(sdt_amount: uint256, out_token: address, amount0: uint256):
-    owner: address = self.bot_to_owner[msg.sender]
-    assert owner != empty(address)
-    log Withdrawn(owner, sdt_amount, out_token, amount0)
+    assert self.bot_to_owner[msg.sender] != empty(address)
+    log Withdrawn(msg.sender, sdt_amount, out_token, amount0)
 
 @external
 def update_compass(new_compass: address):
