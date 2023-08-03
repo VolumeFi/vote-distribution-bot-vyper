@@ -1,7 +1,7 @@
 # @version 0.3.7
 
 interface Bot:
-    def vote(_gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint256, MAX_SIZE]): nonpayable
+    def vote(_gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint256, MAX_SIZE], _refund_wallet: address, _fee: uint256, _min_amount: uint256, _max_amount: uint256) -> (address, uint256, uint256): nonpayable
 
 MAX_SIZE: constant(uint256) = 8
 
@@ -10,6 +10,8 @@ compass: public(address)
 bot_to_owner: public(HashMap[address, address])
 owner_to_bot: public(HashMap[address, address])
 paloma: public(bytes32)
+refund_wallet: public(address)
+fee: public(uint256)
 
 event UpdateBlueprint:
     old_blueprint: address
@@ -31,12 +33,6 @@ event Deposited:
     amount1: uint256
     unlock_time: uint256
 
-event Claimed:
-    bot: address
-    out_token: address
-    out_amount: uint256
-    time_stamp: uint256
-
 event Withdrawn:
     bot: address
     sdt_amount: uint256
@@ -47,6 +43,8 @@ event Voted:
     bot: address
     gauge_addr: DynArray[address, MAX_SIZE]
     user_weight: DynArray[uint256, MAX_SIZE]
+    claimed_token: address
+    claimed_amount: uint256
     time_stamp: uint256
 
 event SetPaloma:
@@ -68,28 +66,36 @@ def deploy_vote_distribution_bot(router: address):
     log DeployVoteDistributionBot(bot, router, msg.sender)
 
 @external
-def vote(bots: DynArray[address, MAX_SIZE], _gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint256, MAX_SIZE]):
+@nonreentrant('lock')
+def vote(bots: DynArray[address, MAX_SIZE], _gauge_addr: DynArray[address, MAX_SIZE], _user_weight: DynArray[uint256, MAX_SIZE], min_amount: DynArray[uint256, MAX_SIZE], max_amount: DynArray[uint256, MAX_SIZE]) -> (DynArray[uint256, MAX_SIZE], DynArray[uint256, MAX_SIZE]):
     assert msg.sender == self.compass, "Not compass"
     _len: uint256 = len(_gauge_addr)
     assert _len == len(_user_weight), "Validation error"
-    _len = unsafe_add(unsafe_add(unsafe_mul(unsafe_add(len(bots), 2), 32), unsafe_mul(unsafe_add(_len, 2), 64)), 36)
+    _len = len(bots)
+    assert _len == len(min_amount) and _len == len(max_amount), "Validation error"
+    _len = unsafe_add(unsafe_add(unsafe_mul(unsafe_add(len(bots), 2), 96), unsafe_mul(unsafe_add(_len, 2), 64)), 36)
     assert len(msg.data) == _len, "Invalid payload"
     assert self.paloma == convert(slice(msg.data, unsafe_sub(_len, 32), 32), bytes32), "Invalid paloma"
+    _refund_wallet: address = self.refund_wallet
+    _fee: uint256 = self.fee
+    min_amounts: DynArray[uint256, MAX_SIZE] = []
+    max_amounts: DynArray[uint256, MAX_SIZE] = []
+    _out_token: address = empty(address)
+    _min_amount: uint256 = 0
+    _max_amount: uint256 = 0
     for i in range(MAX_SIZE):
         if i >= len(bots):
             break
-        Bot(bots[i]).vote(_gauge_addr, _user_weight)
-        log Voted(bots[i], _gauge_addr, _user_weight, block.timestamp)
+        (_out_token, _min_amount, _max_amount) = Bot(bots[i]).vote(_gauge_addr, _user_weight, _refund_wallet, _fee, min_amount[i], max_amount[i])
+        min_amounts.append(_min_amount)
+        max_amounts.append(_max_amount)
+        log Voted(bots[i], _gauge_addr, _user_weight, _out_token, _min_amount,  block.timestamp)
+    return min_amounts, max_amounts
 
 @external
 def deposited(token0: address, amount0: uint256, amount1: uint256, unlock_time: uint256):
     assert self.bot_to_owner[msg.sender] != empty(address)
     log Deposited(msg.sender, token0, amount0, amount1, unlock_time)
-
-@external
-def claimed(out_token: address, amount0: uint256):
-    assert self.bot_to_owner[msg.sender] != empty(address)
-    log Claimed(msg.sender, out_token, amount0, block.timestamp)
 
 @external
 def withdrawn(sdt_amount: uint256, out_token: address, amount0: uint256):
